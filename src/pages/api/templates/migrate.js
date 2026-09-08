@@ -1,11 +1,9 @@
-import { readAccounts, isAccountConfigured } from '../../../lib/store.js';
 import { createTemplate, needsMediaAsset } from '../../../lib/meta.js';
 
 export async function POST({ request }) {
-  const template = await request.json();
-  const accounts = await readAccounts();
+  const { destination, template } = await request.json();
 
-  if (!isAccountConfigured(accounts.destination)) {
+  if (!destination?.wabaId || !destination?.token) {
     return new Response(JSON.stringify({ ok: false, message: 'Destination account is not configured.' }), {
       status: 400,
       headers: { 'Content-Type': 'application/json' },
@@ -24,7 +22,7 @@ export async function POST({ request }) {
   }
 
   try {
-    const result = await createTemplate(accounts.destination, template);
+    const result = await createTemplate(destination, template);
     return new Response(JSON.stringify({ ok: true, id: result.id, status: result.status }), {
       headers: { 'Content-Type': 'application/json' },
     });

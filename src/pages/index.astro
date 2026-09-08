@@ -1,92 +1,80 @@
 ---
 import Layout from '../layouts/Layout.astro';
-import { readAccounts, isAccountConfigured } from '../lib/store.js';
-
-const accounts = await readAccounts();
-const configured = isAccountConfigured(accounts.origin) && isAccountConfigured(accounts.destination);
 ---
-<Layout title="Migration · Template Migrator">
+<Layout title="Migration · Internal Tools">
   <div class="page-head">
     <h1>Template migration</h1>
     <p>Move message templates from the origin WhatsApp Business account to the new one.</p>
   </div>
 
-  {!configured && (
+  <div class="table-wrap" id="not-configured" hidden>
+    <div class="empty-state">
+      <h2>Connect both accounts first</h2>
+      <p>Add the WABA ID and access token for the origin and destination accounts to start reading templates.</p>
+      <a class="btn btn-primary" href="/settings">Go to accounts</a>
+    </div>
+  </div>
+
+  <div id="app" hidden>
+    <div class="bridge" id="bridge">
+      <div class="bridge-account">
+        <p class="bridge-role">Origin</p>
+        <p class="bridge-name" id="origin-name">Origin account</p>
+        <div class="bridge-meta" id="origin-meta"></div>
+      </div>
+      <div class="bridge-arrow">
+        <svg width="44" height="24" viewBox="0 0 44 24" fill="none">
+          <path id="flow-path" d="M2 12 H36" stroke-width="1.5" />
+          <polyline points="30,6 38,12 30,18" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none" />
+          <circle class="flow-dot" r="2.5" fill="var(--accent)" style="offset-path: path('M2 12 H36'); opacity: 0;" />
+        </svg>
+      </div>
+      <div class="bridge-account">
+        <p class="bridge-role">Destination</p>
+        <p class="bridge-name" id="destination-name">Destination account</p>
+        <div class="bridge-meta" id="destination-meta"></div>
+      </div>
+    </div>
+
+    <div id="banner-slot"></div>
+
+    <div class="toolbar">
+      <span class="toolbar-status" id="toolbar-status">Loading templates…</span>
+      <div class="toolbar-actions">
+        <input type="search" id="search-input" class="search-input" placeholder="Search by name" />
+        <select id="category-filter" class="filter-select">
+          <option value="">All categories</option>
+        </select>
+        <button class="btn" id="refresh-btn">Refresh</button>
+      </div>
+    </div>
+
+    <div class="bulkbar" id="bulkbar">
+      <span id="bulk-count">0 selected</span>
+      <button class="btn btn-primary" id="migrate-btn">Migrate selected</button>
+    </div>
+
     <div class="table-wrap">
-      <div class="empty-state">
-        <h2>Connect both accounts first</h2>
-        <p>Add the WABA ID and access token for the origin and destination accounts to start reading templates.</p>
-        <a class="btn btn-primary" href="/settings">Go to accounts</a>
-      </div>
+      <table class="templates" id="templates-table">
+        <thead>
+          <tr>
+            <th class="col-check"><input type="checkbox" id="select-all" /></th>
+            <th>Template</th>
+            <th>Category</th>
+            <th>Language</th>
+            <th>Header</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody id="templates-body"></tbody>
+      </table>
     </div>
-  )}
-
-  {configured && (
-    <div id="app" data-origin-label={accounts.origin.label || 'Origin'} data-destination-label={accounts.destination.label || 'Destination'}>
-      <div class="bridge" id="bridge">
-        <div class="bridge-account">
-          <p class="bridge-role">Origin</p>
-          <p class="bridge-name">{accounts.origin.label || 'Origin account'}</p>
-          <div class="bridge-meta">
-            <span>waba {accounts.origin.wabaId}</span>
-            {accounts.origin.phoneNumberId && <span>phone {accounts.origin.phoneNumberId}</span>}
-          </div>
-        </div>
-        <div class="bridge-arrow">
-          <svg width="44" height="24" viewBox="0 0 44 24" fill="none">
-            <path id="flow-path" d="M2 12 H36" stroke-width="1.5" />
-            <polyline points="30,6 38,12 30,18" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none" />
-            <circle class="flow-dot" r="2.5" fill="var(--accent)" style="offset-path: path('M2 12 H36'); opacity: 0;" />
-          </svg>
-        </div>
-        <div class="bridge-account">
-          <p class="bridge-role">Destination</p>
-          <p class="bridge-name">{accounts.destination.label || 'Destination account'}</p>
-          <div class="bridge-meta">
-            <span>waba {accounts.destination.wabaId}</span>
-            {accounts.destination.phoneNumberId && <span>phone {accounts.destination.phoneNumberId}</span>}
-          </div>
-        </div>
-      </div>
-
-      <div id="banner-slot"></div>
-
-      <div class="toolbar">
-        <span class="toolbar-status" id="toolbar-status">Loading templates…</span>
-        <div class="toolbar-actions">
-          <input type="search" id="search-input" class="search-input" placeholder="Search by name" />
-          <select id="category-filter" class="filter-select">
-            <option value="">All categories</option>
-          </select>
-          <button class="btn" id="refresh-btn">Refresh</button>
-        </div>
-      </div>
-
-      <div class="bulkbar" id="bulkbar">
-        <span id="bulk-count">0 selected</span>
-        <button class="btn btn-primary" id="migrate-btn">Migrate selected</button>
-      </div>
-
-      <div class="table-wrap">
-        <table class="templates" id="templates-table">
-          <thead>
-            <tr>
-              <th class="col-check"><input type="checkbox" id="select-all" /></th>
-              <th>Template</th>
-              <th>Category</th>
-              <th>Language</th>
-              <th>Header</th>
-              <th>Status</th>
-            </tr>
-          </thead>
-          <tbody id="templates-body"></tbody>
-        </table>
-      </div>
-    </div>
-  )}
+  </div>
 </Layout>
 
 <script>
+  import { loadAccounts, isAccountConfigured, type Accounts } from '../lib/accounts-client';
+
   type Template = {
     name: string;
     language: string;
@@ -99,8 +87,45 @@ const configured = isAccountConfigured(accounts.origin) && isAccountConfigured(a
     errorMessage?: string;
   };
 
-  const app = document.getElementById('app');
-  if (app) {
+  const accounts: Accounts = loadAccounts();
+  const configured = isAccountConfigured(accounts.origin) && isAccountConfigured(accounts.destination);
+
+  const notConfigured = document.getElementById('not-configured') as HTMLElement;
+  const app = document.getElementById('app') as HTMLElement;
+
+  if (!configured) {
+    notConfigured.hidden = false;
+  } else {
+    app.hidden = false;
+    renderAccountMeta();
+    initApp();
+  }
+
+  function renderAccountMeta() {
+    (document.getElementById('origin-name') as HTMLElement).textContent = accounts.origin.label || 'Origin account';
+    (document.getElementById('destination-name') as HTMLElement).textContent =
+      accounts.destination.label || 'Destination account';
+
+    const fill = (el: HTMLElement, waba: string, phone: string) => {
+      el.textContent = '';
+      const w = document.createElement('span');
+      w.textContent = `waba ${waba}`;
+      el.appendChild(w);
+      if (phone) {
+        const p = document.createElement('span');
+        p.textContent = `phone ${phone}`;
+        el.appendChild(p);
+      }
+    };
+    fill(document.getElementById('origin-meta') as HTMLElement, accounts.origin.wabaId, accounts.origin.phoneNumberId);
+    fill(
+      document.getElementById('destination-meta') as HTMLElement,
+      accounts.destination.wabaId,
+      accounts.destination.phoneNumberId
+    );
+  }
+
+  function initApp() {
     const body = document.getElementById('templates-body') as HTMLTableSectionElement;
     const toolbarStatus = document.getElementById('toolbar-status') as HTMLElement;
     const bannerSlot = document.getElementById('banner-slot') as HTMLElement;
@@ -121,7 +146,6 @@ const configured = isAccountConfigured(accounts.origin) && isAccountConfigured(a
     }
 
     function isLocked(t: Template) {
-      // already handled, or currently in flight, or known to need manual media
       return ['success', 'exists', 'migrating'].includes(t.resultStatus ?? '') || t.existsOnDestination || t.needsMedia;
     }
 
@@ -201,7 +225,6 @@ const configured = isAccountConfigured(accounts.origin) && isAccountConfigured(a
       if ((target as HTMLInputElement).checked) selected.add(id);
       else selected.delete(id);
       updateBulkbar();
-      // keep the header checkbox in sync without a full re-render
       const rows = visibleTemplates().filter((t) => !isLocked(t));
       selectAll.checked = rows.length > 0 && rows.every((t) => selected.has(rowId(t)));
       selectAll.indeterminate = !selectAll.checked && rows.some((t) => selected.has(rowId(t)));
@@ -222,7 +245,11 @@ const configured = isAccountConfigured(accounts.origin) && isAccountConfigured(a
     async function loadTemplates() {
       toolbarStatus.textContent = 'Loading templates…';
       bannerSlot.innerHTML = '';
-      const res = await fetch('/api/templates/list');
+      const res = await fetch('/api/templates/list', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ origin: accounts.origin, destination: accounts.destination }),
+      });
       const data = await res.json();
 
       if (!res.ok) {
@@ -247,7 +274,7 @@ const configured = isAccountConfigured(accounts.origin) && isAccountConfigured(a
       const res = await fetch('/api/templates/migrate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(t),
+        body: JSON.stringify({ destination: accounts.destination, template: t }),
       });
       const data = await res.json();
       t.resultStatus = data.ok ? 'success' : data.status || 'error';

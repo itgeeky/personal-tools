@@ -1,4 +1,3 @@
-import { readAccounts, isAccountConfigured } from '../../../lib/store.js';
 import { fetchAllTemplates, needsMediaAsset } from '../../../lib/meta.js';
 
 function headerFormat(template) {
@@ -6,20 +5,24 @@ function headerFormat(template) {
   return header?.format || 'NONE';
 }
 
-export async function GET() {
-  const accounts = await readAccounts();
+function isConfigured(account) {
+  return Boolean(account?.wabaId && account?.token);
+}
 
-  if (!isAccountConfigured(accounts.origin) || !isAccountConfigured(accounts.destination)) {
-    return new Response(
-      JSON.stringify({ error: 'Set up both accounts before listing templates.' }),
-      { status: 400, headers: { 'Content-Type': 'application/json' } }
-    );
+export async function POST({ request }) {
+  const { origin, destination } = await request.json();
+
+  if (!isConfigured(origin) || !isConfigured(destination)) {
+    return new Response(JSON.stringify({ error: 'Set up both accounts before listing templates.' }), {
+      status: 400,
+      headers: { 'Content-Type': 'application/json' },
+    });
   }
 
   try {
     const [originTemplates, destinationTemplates] = await Promise.all([
-      fetchAllTemplates(accounts.origin),
-      fetchAllTemplates(accounts.destination),
+      fetchAllTemplates(origin),
+      fetchAllTemplates(destination),
     ]);
 
     const destinationIndex = new Set(
@@ -41,8 +44,8 @@ export async function GET() {
 
     return new Response(
       JSON.stringify({
-        originLabel: accounts.origin.label || 'Origin',
-        destinationLabel: accounts.destination.label || 'Destination',
+        originLabel: origin.label || 'Origin',
+        destinationLabel: destination.label || 'Destination',
         originCount: originTemplates.length,
         destinationCount: destinationTemplates.length,
         templates,
