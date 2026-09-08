@@ -1,0 +1,881 @@
+---
+import Layout from '../layouts/Layout.astro';
+---
+<Layout title="Smartsheet · Internal Tools">
+  <div class="sheet-tool">
+    <div class="page-head">
+      <h1>Smartsheet → Table</h1>
+      <p>
+        Load a raw Smartsheet API response — a sheet, or an array of sheets — and browse it as a
+        table. Rows render as you scroll, so a 1,000,000-row export opens as fast as a 10-row one,
+        and nothing about the data is reshaped or reformatted.
+      </p>
+    </div>
+
+    <div class="panel is-open" id="input-panel">
+      <div class="panel-head" id="panel-head">
+        <h2><span class="arrow">▶</span> Load JSON</h2>
+        <span class="status-msg" id="status-msg"></span>
+      </div>
+      <div class="panel-body">
+        <div class="dropzone" id="dropzone">
+          <p>Drop a Smartsheet JSON export here, or</p>
+          <button type="button" class="btn btn-primary" id="pick-file-btn">Choose file</button>
+          <input type="file" id="file-input" accept="application/json,.json" hidden />
+          <p class="hint">Recommended for large exports — the file is parsed directly, it never sits in a text box.</p>
+        </div>
+
+        <details class="paste-details" id="paste-details">
+          <summary>Or paste JSON directly (fine for small responses, sluggish past a few thousand rows)</summary>
+          <textarea id="json-input" placeholder="Paste the JSON exported from Smartsheet here…"></textarea>
+          <div class="row-actions">
+            <button class="btn" id="convert-btn">Convert to table</button>
+            <button class="btn" id="sample-btn">Load example</button>
+            <button class="btn btn-quiet" id="clear-btn">Clear</button>
+          </div>
+        </details>
+      </div>
+    </div>
+
+    <div class="meta-block" id="meta-block" hidden>
+      <div class="sub" id="sheet-meta"></div>
+      <div class="meta-row" id="meta-chips"></div>
+    </div>
+
+    <div class="toolbar" id="toolbar" hidden>
+      <input type="search" id="search-input" class="search-input" placeholder="Search any column" />
+      <select id="status-filter" class="filter-select" hidden>
+        <option value="">All statuses</option>
+      </select>
+    </div>
+
+    <div class="vt-scroll" id="vt-scroll" hidden>
+      <table class="vt-table">
+        <thead id="vt-thead"></thead>
+        <tbody id="vt-tbody"></tbody>
+      </table>
+    </div>
+
+    <div class="empty-state" id="empty-state">
+      <h2>No table yet</h2>
+      <p>Load a JSON file above, or paste a small response, to see it rendered as a table.</p>
+    </div>
+
+    <footer class="tool-footer" id="tool-footer"></footer>
+  </div>
+</Layout>
+
+<style>
+  .sheet-tool {
+    /* status swatches — specific to this tool's data, kept local rather than in the shared token set */
+    --st-programado: #7a8a97;
+    --st-transito: #8a9c5c;
+    --st-terminal: #5c9c9c;
+    --st-cargado: #5c8a9c;
+    --st-ruta: var(--accent);
+    --st-destino: var(--warning);
+    --st-entregado: var(--success);
+    --st-cancelado: var(--danger);
+    --st-externo: #9c7ed1;
+    --st-producto: #7e9cd1;
+    --st-cliente: #bc9c5c;
+    --st-seguridad: #d17ea8;
+    --st-default: #7a8a97;
+  }
+
+  .dropzone {
+    border: 1px dashed var(--line);
+    border-radius: var(--radius);
+    padding: 22px;
+    text-align: center;
+    margin-bottom: 16px;
+  }
+
+  .dropzone.is-drag {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+  }
+
+  .dropzone p {
+    margin: 0 0 10px;
+    color: var(--ink-soft);
+    font-size: 13.5px;
+  }
+
+  .dropzone .hint {
+    margin-top: 10px;
+    font-size: 12px;
+    color: var(--ink-faint);
+  }
+
+  .paste-details summary {
+    cursor: pointer;
+    color: var(--ink-soft);
+    font-size: 13px;
+    padding: 6px 0;
+  }
+
+  .paste-details summary:hover {
+    color: var(--ink);
+  }
+
+  .paste-details textarea {
+    width: 100%;
+    min-height: 130px;
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    color: var(--ink);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    padding: 12px;
+    resize: vertical;
+    line-height: 1.5;
+    margin-top: 8px;
+  }
+
+  .paste-details textarea:focus {
+    border-color: var(--accent);
+  }
+
+  .row-actions {
+    display: flex;
+    gap: 10px;
+    margin-top: 12px;
+    flex-wrap: wrap;
+  }
+
+  .status-msg {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--ink-faint);
+  }
+
+  .status-msg.err {
+    color: var(--danger);
+  }
+
+  .status-msg.ok {
+    color: var(--success);
+  }
+
+  .meta-block {
+    margin-bottom: 16px;
+  }
+
+  .sub {
+    color: var(--ink-faint);
+    font-size: 12.5px;
+    font-family: var(--font-mono);
+    margin-bottom: 10px;
+  }
+
+  .toolbar {
+    margin-bottom: 12px;
+  }
+
+  #status-filter[hidden] {
+    display: none;
+  }
+
+  /* ---- virtualized table ---- */
+
+  .vt-scroll {
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    overflow: auto;
+    max-height: min(65vh, 680px);
+    background: var(--surface);
+  }
+
+  table.vt-table {
+    border-collapse: collapse;
+    width: 100%;
+    min-width: 720px;
+    table-layout: auto;
+  }
+
+  .vt-table thead th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    background: var(--surface-hover);
+    text-align: left;
+    padding: 10px 14px;
+    font-size: 11.5px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    color: var(--ink-faint);
+    border-bottom: 1px solid var(--line);
+    border-right: 1px solid var(--line-soft);
+    white-space: nowrap;
+    cursor: pointer;
+  }
+
+  .vt-table thead th:last-child {
+    border-right: none;
+  }
+
+  .vt-table thead th:hover {
+    color: var(--ink);
+  }
+
+  .vt-table thead th.is-sorted {
+    color: var(--ink);
+    border-bottom-color: var(--accent);
+  }
+
+  .vt-table thead th .sort-ind {
+    color: var(--accent);
+    margin-left: 4px;
+  }
+
+  .vt-table thead th.num,
+  .vt-table td.num {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .vt-table tbody tr {
+    height: 36px;
+  }
+
+  .vt-table tbody td {
+    padding: 9px 14px;
+    border-bottom: 1px solid var(--line-soft);
+    border-right: 1px solid var(--line-soft);
+    white-space: nowrap;
+    color: var(--ink);
+    font-size: 13.5px;
+  }
+
+  .vt-table tbody td:last-child {
+    border-right: none;
+  }
+
+  .vt-table tbody tr.alt td {
+    background: rgba(255, 255, 255, 0.028);
+  }
+
+  .vt-table tbody tr:hover td {
+    background: var(--surface-hover);
+  }
+
+  td.ref {
+    font-family: var(--font-mono);
+    color: var(--accent);
+    font-weight: 500;
+  }
+
+  td.econ {
+    font-family: var(--font-mono);
+    color: var(--ink-soft);
+    font-size: 12.5px;
+  }
+
+  td.empty {
+    color: var(--ink-faint);
+    opacity: 0.5;
+  }
+
+  .vt-no-results td {
+    text-align: center;
+    color: var(--ink-soft);
+    padding: 40px 16px !important;
+    border-right: none;
+  }
+
+  .status-badge {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 100px;
+    font-size: 11.5px;
+    font-weight: 600;
+    color: var(--bg);
+    white-space: nowrap;
+    box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.15);
+  }
+
+  .tool-footer {
+    margin-top: 14px;
+    color: var(--ink-faint);
+    font-size: 11.5px;
+    font-family: var(--font-mono);
+  }
+</style>
+
+<script>
+  type Column = { id: number; index?: number; title: string };
+  type Cell = { columnId: number; displayValue?: string; value?: unknown };
+  type Row = { id: number; cells: Cell[] };
+  type Sheet = {
+    name?: string;
+    workspace?: { name?: string };
+    modifiedAt?: string;
+    permalink?: string;
+    totalRowCount?: number;
+    filteredRowCount?: number;
+    columns: Column[];
+    rows: Row[];
+  };
+
+  const ROW_HEIGHT = 36;
+  const OVERSCAN = 10;
+
+  const STATUS_COLOR_RULES: [RegExp, string][] = [
+    [/PROGRAMADO/i, 'var(--st-programado)'],
+    [/TRANSITO/i, 'var(--st-transito)'],
+    [/TERMINAL/i, 'var(--st-terminal)'],
+    [/CARGADO/i, 'var(--st-cargado)'],
+    [/RUTA/i, 'var(--st-ruta)'],
+    [/DESTINO/i, 'var(--st-destino)'],
+    [/ENTREGADO/i, 'var(--st-entregado)'],
+    [/CANCELADO/i, 'var(--st-cancelado)'],
+    [/EXTERNO/i, 'var(--st-externo)'],
+    [/PRODUCTO/i, 'var(--st-producto)'],
+    [/CLIENTE/i, 'var(--st-cliente)'],
+    [/SEGURIDAD/i, 'var(--st-seguridad)'],
+  ];
+
+  function statusColor(val: string) {
+    for (const [re, color] of STATUS_COLOR_RULES) if (re.test(val)) return color;
+    return 'var(--st-default)';
+  }
+
+  function escapeHtml(str: unknown) {
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+  }
+
+  function formatBytes(n: number) {
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+    return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  }
+
+  // elements
+  const panel = document.getElementById('input-panel') as HTMLElement;
+  const panelHead = document.getElementById('panel-head') as HTMLElement;
+  const statusMsg = document.getElementById('status-msg') as HTMLElement;
+  const dropzone = document.getElementById('dropzone') as HTMLElement;
+  const pickFileBtn = document.getElementById('pick-file-btn') as HTMLButtonElement;
+  const fileInput = document.getElementById('file-input') as HTMLInputElement;
+  const jsonInput = document.getElementById('json-input') as HTMLTextAreaElement;
+  const convertBtn = document.getElementById('convert-btn') as HTMLButtonElement;
+  const sampleBtn = document.getElementById('sample-btn') as HTMLButtonElement;
+  const clearBtn = document.getElementById('clear-btn') as HTMLButtonElement;
+  const metaBlock = document.getElementById('meta-block') as HTMLElement;
+  const sheetMetaEl = document.getElementById('sheet-meta') as HTMLElement;
+  const metaChipsEl = document.getElementById('meta-chips') as HTMLElement;
+  const toolbar = document.getElementById('toolbar') as HTMLElement;
+  const searchInput = document.getElementById('search-input') as HTMLInputElement;
+  const statusFilterEl = document.getElementById('status-filter') as HTMLSelectElement;
+  const vtScroll = document.getElementById('vt-scroll') as HTMLElement;
+  const vtThead = document.getElementById('vt-thead') as HTMLElement;
+  const vtTbody = document.getElementById('vt-tbody') as HTMLElement;
+  const emptyState = document.getElementById('empty-state') as HTMLElement;
+  const toolFooter = document.getElementById('tool-footer') as HTMLElement;
+
+  // state
+  let sheet: Sheet | null = null;
+  let columns: Column[] = [];
+  let rows: Row[] = [];
+  let columnValueCache: Map<number, (string | null)[]> = new Map();
+  let filteredIndices: number[] = [];
+  let sortState: { colId: number | null; dir: 1 | -1 } = { colId: null, dir: 1 };
+  let statusCol: Column | undefined;
+  let refCol: Column | undefined;
+  let econCol: Column | undefined;
+  let numericColumnIds: Set<number> = new Set();
+  let scrollScheduled = false;
+
+  function setStatus(msg: string, type?: 'ok' | 'err') {
+    statusMsg.textContent = msg;
+    statusMsg.className = 'status-msg' + (type ? ' ' + type : '');
+  }
+
+  function setBusy(busy: boolean) {
+    convertBtn.disabled = busy;
+    sampleBtn.disabled = busy;
+    pickFileBtn.disabled = busy;
+    searchInput.disabled = busy;
+    statusFilterEl.disabled = busy;
+  }
+
+  panelHead.addEventListener('click', () => panel.classList.toggle('is-open'));
+
+  pickFileBtn.addEventListener('click', () => fileInput.click());
+  fileInput.addEventListener('change', () => {
+    const file = fileInput.files?.[0];
+    if (file) handleFile(file);
+  });
+
+  dropzone.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    dropzone.classList.add('is-drag');
+  });
+  dropzone.addEventListener('dragleave', () => dropzone.classList.remove('is-drag'));
+  dropzone.addEventListener('drop', (e) => {
+    e.preventDefault();
+    dropzone.classList.remove('is-drag');
+    const file = e.dataTransfer?.files?.[0];
+    if (file) handleFile(file);
+  });
+
+  function handleFile(file: File) {
+    setStatus(`Reading ${file.name} (${formatBytes(file.size)})…`);
+    setBusy(true);
+    const reader = new FileReader();
+    reader.onerror = () => {
+      setStatus('Could not read that file.', 'err');
+      setBusy(false);
+    };
+    reader.onload = () => {
+      const text = String(reader.result);
+      parseAndLoad(text);
+    };
+    reader.readAsText(file);
+  }
+
+  function parseAndLoad(text: string) {
+    setStatus('Parsing JSON…');
+    // yield one frame so the "parsing" status actually paints before the blocking parse
+    setTimeout(() => {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(text);
+      } catch (e) {
+        setStatus('Invalid JSON: ' + (e as Error).message, 'err');
+        setBusy(false);
+        return;
+      }
+      loadSheet(parsed);
+      setBusy(false);
+    }, 0);
+  }
+
+  function loadSheet(parsed: unknown) {
+    const candidate = Array.isArray(parsed) ? parsed[0] : parsed;
+    const s = candidate as Sheet;
+    if (!s || !Array.isArray(s.columns) || !Array.isArray(s.rows)) {
+      setStatus('Unrecognized shape — expected a sheet with "columns" and "rows".', 'err');
+      return;
+    }
+
+    sheet = s;
+    columns = [...s.columns].sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
+    rows = s.rows;
+    statusCol = columns.find((c) => /ESTATUS/i.test(c.title));
+    refCol = columns.find((c) => /REFEREN/i.test(c.title));
+    econCol = columns.find((c) => /ECONOMICO/i.test(c.title));
+    sortState = { colId: null, dir: 1 };
+
+    buildColumnValueCache();
+    numericColumnIds = new Set(columns.filter((c) => isNumericColumn(c.id)).map((c) => c.id));
+    buildStatusFilterOptions();
+    filteredIndices = identityIndices(rows.length);
+
+    renderMeta();
+    renderHeader();
+
+    emptyState.hidden = true;
+    metaBlock.hidden = false;
+    toolbar.hidden = false;
+    vtScroll.hidden = false;
+    vtScroll.scrollTop = 0;
+    renderVisible();
+    renderFooter();
+
+    panel.classList.remove('is-open');
+    setStatus(`Loaded ${rows.length.toLocaleString('en-US')} rows.`, 'ok');
+  }
+
+  function identityIndices(n: number) {
+    const arr = new Array(n);
+    for (let i = 0; i < n; i++) arr[i] = i;
+    return arr;
+  }
+
+  function buildColumnValueCache() {
+    columnValueCache = new Map();
+    for (const c of columns) columnValueCache.set(c.id, new Array(rows.length).fill(null));
+    for (let i = 0; i < rows.length; i++) {
+      const cells = rows[i].cells;
+      if (!cells) continue;
+      for (let j = 0; j < cells.length; j++) {
+        const cell = cells[j];
+        const arr = columnValueCache.get(cell.columnId);
+        if (!arr) continue;
+        const v = cell.displayValue !== undefined ? cell.displayValue : cell.value;
+        arr[i] = v === undefined || v === null ? null : String(v);
+      }
+    }
+  }
+
+  function isNumericColumn(colId: number) {
+    const arr = columnValueCache.get(colId);
+    if (!arr) return false;
+    let seen = 0;
+    let numeric = 0;
+    for (let i = 0; i < arr.length && seen < 50; i++) {
+      const v = arr[i];
+      if (v === null || v === '') continue;
+      seen++;
+      if (/^-?\d+(\.\d+)?$/.test(v)) numeric++;
+    }
+    return seen > 0 && numeric === seen;
+  }
+
+  function buildStatusFilterOptions() {
+    statusFilterEl.innerHTML = '<option value="">All statuses</option>';
+    if (!statusCol) {
+      statusFilterEl.hidden = true;
+      return;
+    }
+    statusFilterEl.hidden = false;
+    const values = new Set(columnValueCache.get(statusCol.id)!.filter((v): v is string => v !== null));
+    [...values].sort().forEach((v) => {
+      const opt = document.createElement('option');
+      opt.value = v;
+      opt.textContent = v;
+      statusFilterEl.appendChild(opt);
+    });
+  }
+
+  function renderMeta() {
+    if (!sheet) return;
+    sheetMetaEl.textContent = [
+      sheet.name || 'Untitled sheet',
+      sheet.workspace?.name,
+      sheet.modifiedAt ? `updated ${sheet.modifiedAt}` : null,
+    ]
+      .filter(Boolean)
+      .join('  ·  ');
+
+    const chips: [string, number][] = [
+      ['Total rows', sheet.totalRowCount ?? rows.length],
+      ['Filtered by Smartsheet', sheet.filteredRowCount ?? rows.length],
+      ['Showing', filteredIndices.length],
+      ['Columns', columns.length],
+    ];
+    metaChipsEl.innerHTML = chips
+      .map(([l, n]) => `<div class="meta-chip"><div class="n">${n.toLocaleString('en-US')}</div><div class="l">${l}</div></div>`)
+      .join('');
+  }
+
+  function renderHeader() {
+    vtThead.innerHTML =
+      '<tr>' +
+      columns
+        .map((c, i) => {
+          const isSorted = sortState.colId === c.id;
+          const indicator = isSorted ? (sortState.dir === 1 ? '↑' : '↓') : '';
+          const cls = [isSorted && 'is-sorted', numericColumnIds.has(c.id) && 'num'].filter(Boolean).join(' ');
+          return `<th class="${cls}" data-col-index="${i}">${escapeHtml(c.title)}<span class="sort-ind">${indicator}</span></th>`;
+        })
+        .join('') +
+      '</tr>';
+  }
+
+  vtThead.addEventListener('click', (e) => {
+    const th = (e.target as HTMLElement).closest('th[data-col-index]') as HTMLElement | null;
+    if (!th) return;
+    sortBy(Number(th.dataset.colIndex));
+  });
+
+  function sortBy(colIndex: number) {
+    const col = columns[colIndex];
+    if (sortState.colId === col.id) sortState.dir = sortState.dir === 1 ? -1 : 1;
+    else sortState = { colId: col.id, dir: 1 };
+
+    setStatus('Sorting…');
+    setBusy(true);
+    setTimeout(() => {
+      const values = columnValueCache.get(col.id)!;
+      const dir = sortState.dir;
+      filteredIndices.sort((a, b) => {
+        const av = values[a];
+        const bv = values[b];
+        if (av === null && bv === null) return 0;
+        if (av === null) return 1;
+        if (bv === null) return -1;
+        if (av < bv) return -1 * dir;
+        if (av > bv) return 1 * dir;
+        return 0;
+      });
+      renderHeader();
+      vtScroll.scrollTop = 0;
+      renderVisible();
+      setBusy(false);
+      setStatus('');
+    }, 0);
+  }
+
+  function computeFilteredIndices() {
+    const q = searchInput.value.trim().toLowerCase();
+    const statusVal = statusFilterEl.value;
+    const statusValues = statusCol ? columnValueCache.get(statusCol.id)! : null;
+    const columnArrays = columns.map((c) => columnValueCache.get(c.id)!);
+    const n = rows.length;
+    const result: number[] = [];
+
+    for (let i = 0; i < n; i++) {
+      if (statusVal && statusValues && statusValues[i] !== statusVal) continue;
+      if (q) {
+        let found = false;
+        for (const arr of columnArrays) {
+          const v = arr[i];
+          if (v !== null && v.toLowerCase().includes(q)) {
+            found = true;
+            break;
+          }
+        }
+        if (!found) continue;
+      }
+      result.push(i);
+    }
+    return result;
+  }
+
+  function recomputeFilter() {
+    setStatus('Filtering…');
+    setBusy(true);
+    setTimeout(() => {
+      filteredIndices = computeFilteredIndices();
+      if (sortState.colId !== null) {
+        const values = columnValueCache.get(sortState.colId)!;
+        const dir = sortState.dir;
+        filteredIndices.sort((a, b) => {
+          const av = values[a];
+          const bv = values[b];
+          if (av === null && bv === null) return 0;
+          if (av === null) return 1;
+          if (bv === null) return -1;
+          if (av < bv) return -1 * dir;
+          if (av > bv) return 1 * dir;
+          return 0;
+        });
+      }
+      vtScroll.scrollTop = 0;
+      renderMeta();
+      renderVisible();
+      renderFooter();
+      setBusy(false);
+      setStatus('');
+    }, 0);
+  }
+
+  function debounce<A extends unknown[]>(fn: (...args: A) => void, ms: number) {
+    let t: ReturnType<typeof setTimeout>;
+    return (...args: A) => {
+      clearTimeout(t);
+      t = setTimeout(() => fn(...args), ms);
+    };
+  }
+
+  const debouncedFilter = debounce(recomputeFilter, 250);
+  searchInput.addEventListener('input', debouncedFilter);
+  statusFilterEl.addEventListener('change', recomputeFilter);
+
+  function renderRowHtml(rowIndex: number, position: number) {
+    let html = `<tr class="${position % 2 === 1 ? 'alt' : ''}">`;
+    for (const c of columns) {
+      const v = columnValueCache.get(c.id)![rowIndex];
+      const classes: string[] = [];
+      if (numericColumnIds.has(c.id)) classes.push('num');
+      let content: string;
+      if (v === null || v === '') {
+        content = '—';
+        classes.push('empty');
+      } else if (statusCol && c.id === statusCol.id) {
+        content = `<span class="status-badge" style="background:${statusColor(v)}">${escapeHtml(v)}</span>`;
+      } else if (refCol && c.id === refCol.id) {
+        classes.push('ref');
+        content = escapeHtml(v);
+      } else if (econCol && c.id === econCol.id) {
+        classes.push('econ');
+        content = escapeHtml(v);
+      } else {
+        content = escapeHtml(v);
+      }
+      html += `<td class="${classes.join(' ')}">${content}</td>`;
+    }
+    html += '</tr>';
+    return html;
+  }
+
+  function renderVisible() {
+    if (!sheet) return;
+    const total = filteredIndices.length;
+
+    if (total === 0) {
+      vtTbody.innerHTML = `<tr class="vt-no-results"><td colspan="${columns.length}">No rows match your search.</td></tr>`;
+      return;
+    }
+
+    const scrollTop = vtScroll.scrollTop;
+    const viewportH = vtScroll.clientHeight || 400;
+    const start = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - OVERSCAN);
+    const visibleCount = Math.ceil(viewportH / ROW_HEIGHT) + OVERSCAN * 2;
+    const end = Math.min(total, start + visibleCount);
+
+    const topPad = start * ROW_HEIGHT;
+    const bottomPad = (total - end) * ROW_HEIGHT;
+
+    let html = '';
+    if (topPad > 0) html += `<tr style="height:${topPad}px"><td colspan="${columns.length}" style="padding:0;border:0"></td></tr>`;
+    for (let k = start; k < end; k++) html += renderRowHtml(filteredIndices[k], k);
+    if (bottomPad > 0) html += `<tr style="height:${bottomPad}px"><td colspan="${columns.length}" style="padding:0;border:0"></td></tr>`;
+
+    vtTbody.innerHTML = html;
+  }
+
+  vtScroll.addEventListener('scroll', () => {
+    if (scrollScheduled) return;
+    scrollScheduled = true;
+    requestAnimationFrame(() => {
+      renderVisible();
+      scrollScheduled = false;
+    });
+  });
+
+  window.addEventListener('resize', () => renderVisible());
+
+  function renderFooter() {
+    if (!sheet) return;
+    const parts = [`${filteredIndices.length.toLocaleString('en-US')} of ${rows.length.toLocaleString('en-US')} rows visible`];
+    if (sheet.permalink) parts.push(sheet.permalink);
+    toolFooter.textContent = parts.join('  ·  ');
+  }
+
+  convertBtn.addEventListener('click', () => {
+    const raw = jsonInput.value.trim();
+    if (!raw) {
+      setStatus('Paste a JSON response or choose a file first.', 'err');
+      return;
+    }
+    parseAndLoad(raw);
+  });
+
+  sampleBtn.addEventListener('click', () => {
+    jsonInput.value = JSON.stringify(SAMPLE_DATA, null, 2);
+    panel.classList.add('is-open');
+    loadSheet(SAMPLE_DATA);
+  });
+
+  clearBtn.addEventListener('click', () => {
+    jsonInput.value = '';
+    fileInput.value = '';
+    sheet = null;
+    columns = [];
+    rows = [];
+    columnValueCache = new Map();
+    numericColumnIds = new Set();
+    filteredIndices = [];
+    searchInput.value = '';
+    metaBlock.hidden = true;
+    toolbar.hidden = true;
+    vtScroll.hidden = true;
+    emptyState.hidden = false;
+    toolFooter.textContent = '';
+    setStatus('');
+  });
+
+  // ---- bundled example (a trimmed real Smartsheet "get sheet" response) ----
+  const SAMPLE_DATA = [
+    {
+      id: 7914131467593604,
+      name: 'Arch OP',
+      totalRowCount: 4885,
+      filteredRowCount: 73,
+      workspace: { id: 7765130919339908, name: 'Red 20 Millas' },
+      permalink: 'https://app.smartsheet.com/sheets/2hWQvPQ9qmv6wCgxgfPR33WpQ7x4v73cfJhmcHr1',
+      modifiedAt: '2026-09-07T19:07:48Z',
+      columns: [
+        { id: 2326409282119556, index: 0, title: 'REFERENCIA' },
+        { id: 2938016920037252, index: 1, title: 'DESTINO' },
+        { id: 7441616547407748, index: 2, title: 'PRODUCTO' },
+        { id: 1907860424157060, index: 3, title: 'ECONOMICO' },
+        { id: 4608759198181252, index: 4, title: 'ESTATUS OPS' },
+        { id: 3482859291338628, index: 5, title: 'ETA DESTINO' },
+        { id: 7986458918709124, index: 6, title: 'FECHA ETA DESTINO' },
+      ],
+      rows: [
+        { id: 2545052093644676, cells: [
+          { columnId: 2326409282119556, displayValue: 'R20M2620923' },
+          { columnId: 2938016920037252, displayValue: 'COSTCO PUEBLA' },
+          { columnId: 7441616547407748, displayValue: 'REGULAR' },
+          { columnId: 1907860424157060, displayValue: '40-LER-42-49-A' },
+          { columnId: 4608759198181252, displayValue: '05 DESTINO' },
+          { columnId: 3482859291338628, displayValue: '11:00' },
+          { columnId: 7986458918709124, value: '2026-09-07' },
+        ]},
+        { id: 7048651721015172, cells: [
+          { columnId: 2326409282119556, displayValue: 'R20M2620924' },
+          { columnId: 2938016920037252, displayValue: 'COSTCO PUEBLA' },
+          { columnId: 7441616547407748, displayValue: 'PREMIUM' },
+          { columnId: 1907860424157060, displayValue: '40-LER-42-49-A' },
+          { columnId: 4608759198181252, displayValue: '00 PROGRAMADO' },
+          { columnId: 3482859291338628 },
+          { columnId: 7986458918709124 },
+        ]},
+        { id: 4656114418974596, cells: [
+          { columnId: 2326409282119556, displayValue: 'R20M2620938' },
+          { columnId: 2938016920037252, displayValue: 'COSTCO ATIZAPAN' },
+          { columnId: 7441616547407748, displayValue: 'REGULAR ZM' },
+          { columnId: 1907860424157060, displayValue: '30-LER-48-10-A' },
+          { columnId: 4608759198181252, displayValue: '04 RUTA' },
+          { columnId: 3482859291338628, displayValue: '14:00' },
+          { columnId: 7986458918709124, value: '2026-09-07' },
+        ]},
+        { id: 8698225246207876, cells: [
+          { columnId: 2326409282119556, displayValue: 'R20M2620768' },
+          { columnId: 2938016920037252, displayValue: 'OTUMBA' },
+          { columnId: 7441616547407748, displayValue: 'DIESEL' },
+          { columnId: 1907860424157060, displayValue: '6-TRA-P301-C2' },
+          { columnId: 4608759198181252, displayValue: '05 DESTINO' },
+          { columnId: 3482859291338628, displayValue: '13:00' },
+          { columnId: 7986458918709124, value: '2026-09-07' },
+        ]},
+        { id: 1427948279824260, cells: [
+          { columnId: 2326409282119556, displayValue: 'R20M2620736' },
+          { columnId: 2938016920037252, displayValue: 'LA VILLA' },
+          { columnId: 7441616547407748, displayValue: 'DIESEL' },
+          { columnId: 1907860424157060, displayValue: '11-TRA-P301-C1' },
+          { columnId: 4608759198181252, displayValue: '00 PROGRAMADO' },
+          { columnId: 3482859291338628 },
+          { columnId: 7986458918709124 },
+        ]},
+        { id: 3116798140088196, cells: [
+          { columnId: 2326409282119556, displayValue: 'R20M2620731' },
+          { columnId: 2938016920037252, displayValue: 'CUITLAHUAC' },
+          { columnId: 7441616547407748, displayValue: 'REGULAR ZM' },
+          { columnId: 1907860424157060, displayValue: '20-TRA-T6000-R6003' },
+          { columnId: 4608759198181252, displayValue: '01 TRANSITO TERMINAL' },
+          { columnId: 3482859291338628 },
+          { columnId: 7986458918709124 },
+        ]},
+        { id: 4242698046930820, cells: [
+          { columnId: 2326409282119556, displayValue: 'R20M2620700' },
+          { columnId: 2938016920037252, displayValue: 'VALLE DE BRAVO' },
+          { columnId: 7441616547407748, displayValue: 'REGULAR' },
+          { columnId: 1907860424157060, displayValue: '32-ATO-272-573' },
+          { columnId: 4608759198181252, displayValue: '04 RUTA' },
+          { columnId: 3482859291338628, displayValue: '18:00' },
+          { columnId: 7986458918709124, value: '2026-09-07' },
+        ]},
+        { id: 2866363529559940, cells: [
+          { columnId: 2326409282119556, displayValue: 'R20M2620978' },
+          { columnId: 2938016920037252, displayValue: 'GASOCAL' },
+          { columnId: 7441616547407748, displayValue: 'REGULAR' },
+          { columnId: 1907860424157060, displayValue: '16-PTP-FZC4047-FZC4047-C2' },
+          { columnId: 4608759198181252, displayValue: '04 RUTA' },
+          { columnId: 3482859291338628, displayValue: '22:00' },
+          { columnId: 7986458918709124, value: '2026-09-07' },
+        ]},
+      ],
+    },
+  ];
+</script>

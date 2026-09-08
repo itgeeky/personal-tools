@@ -1,0 +1,146 @@
+---
+import Layout from '../layouts/Layout.astro';
+import { readAccounts } from '../lib/store.js';
+
+const accounts = await readAccounts();
+---
+<Layout title="Accounts · Template Migrator">
+  <div class="page-head">
+    <h1>Accounts</h1>
+    <p>
+      Connect the Meta WhatsApp Business account you're migrating templates from, and the one
+      you're moving them to. Credentials are stored locally for this tool only.
+    </p>
+  </div>
+
+  <form id="accounts-form">
+    <div class="settings-grid">
+      <section class="account-card" data-account="origin">
+        <h2>Origin</h2>
+        <p class="role-tag">Templates are read from here</p>
+
+        <div class="field">
+          <label for="origin-label">Business name</label>
+          <input id="origin-label" name="label" type="text" placeholder="e.g. Dorstep MX — old"
+            value={accounts.origin.label} />
+        </div>
+        <div class="field">
+          <label for="origin-waba">WABA ID</label>
+          <input id="origin-waba" name="wabaId" type="text" inputmode="numeric"
+            value={accounts.origin.wabaId} required />
+        </div>
+        <div class="field">
+          <label for="origin-phone">Phone number ID</label>
+          <input id="origin-phone" name="phoneNumberId" type="text" inputmode="numeric"
+            value={accounts.origin.phoneNumberId} />
+          <p class="hint">Not required to read templates, kept for reference.</p>
+        </div>
+        <div class="field">
+          <label for="origin-token">Access token</label>
+          <input id="origin-token" name="token" type="password" autocomplete="off"
+            placeholder={accounts.origin.tokenSet ? '•••••••••••• saved — leave blank to keep' : 'Permanent system user token'} />
+        </div>
+
+        <div class="card-footer">
+          <button type="button" class="btn" data-verify="origin">Test connection</button>
+          <span class="verify-result" data-verify-result="origin"></span>
+        </div>
+      </section>
+
+      <section class="account-card" data-account="destination">
+        <h2>Destination</h2>
+        <p class="role-tag">Templates are created here</p>
+
+        <div class="field">
+          <label for="destination-label">Business name</label>
+          <input id="destination-label" name="label" type="text" placeholder="e.g. Dorstep MX — new"
+            value={accounts.destination.label} />
+        </div>
+        <div class="field">
+          <label for="destination-waba">WABA ID</label>
+          <input id="destination-waba" name="wabaId" type="text" inputmode="numeric"
+            value={accounts.destination.wabaId} required />
+        </div>
+        <div class="field">
+          <label for="destination-phone">Phone number ID</label>
+          <input id="destination-phone" name="phoneNumberId" type="text" inputmode="numeric"
+            value={accounts.destination.phoneNumberId} />
+          <p class="hint">Not required to create templates, kept for reference.</p>
+        </div>
+        <div class="field">
+          <label for="destination-token">Access token</label>
+          <input id="destination-token" name="token" type="password" autocomplete="off"
+            placeholder={accounts.destination.tokenSet ? '•••••••••••• saved — leave blank to keep' : 'Permanent system user token'} />
+        </div>
+
+        <div class="card-footer">
+          <button type="button" class="btn" data-verify="destination">Test connection</button>
+          <span class="verify-result" data-verify-result="destination"></span>
+        </div>
+      </section>
+    </div>
+
+    <div class="settings-save">
+      <button type="submit" class="btn btn-primary" id="save-btn">Save accounts</button>
+    </div>
+  </form>
+</Layout>
+
+<script>
+  const form = document.getElementById('accounts-form') as HTMLFormElement;
+  const saveBtn = document.getElementById('save-btn') as HTMLButtonElement;
+
+  function readCard(role: string) {
+    const card = document.querySelector(`[data-account="${role}"]`) as HTMLElement;
+    const get = (name: string) => (card.querySelector(`[name="${name}"]`) as HTMLInputElement).value.trim();
+    return { label: get('label'), wabaId: get('wabaId'), phoneNumberId: get('phoneNumberId'), token: get('token') };
+  }
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Saving…';
+    try {
+      await fetch('/api/accounts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ origin: readCard('origin'), destination: readCard('destination') }),
+      });
+      saveBtn.textContent = 'Saved';
+      setTimeout(() => (saveBtn.textContent = 'Save accounts'), 1400);
+    } finally {
+      saveBtn.disabled = false;
+    }
+  });
+
+  document.querySelectorAll<HTMLButtonElement>('[data-verify]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const role = btn.dataset.verify!;
+      const resultEl = document.querySelector(`[data-verify-result="${role}"]`) as HTMLElement;
+
+      // save first so the server has the latest token/waba id to test against
+      saveBtn.click();
+      await new Promise((r) => setTimeout(r, 250));
+
+      btn.disabled = true;
+      resultEl.className = 'verify-result';
+      resultEl.textContent = 'Checking…';
+
+      const res = await fetch('/api/accounts/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ which: role }),
+      });
+      const data = await res.json();
+
+      if (data.ok) {
+        resultEl.className = 'verify-result is-ok';
+        resultEl.textContent = `Connected — ${data.name}`;
+      } else {
+        resultEl.className = 'verify-result is-fail';
+        resultEl.textContent = data.message;
+      }
+      btn.disabled = false;
+    });
+  });
+</script>

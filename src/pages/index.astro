@@ -1,0 +1,281 @@
+---
+import Layout from '../layouts/Layout.astro';
+import { readAccounts, isAccountConfigured } from '../lib/store.js';
+
+const accounts = await readAccounts();
+const configured = isAccountConfigured(accounts.origin) && isAccountConfigured(accounts.destination);
+---
+<Layout title="Migration · Template Migrator">
+  <div class="page-head">
+    <h1>Template migration</h1>
+    <p>Move message templates from the origin WhatsApp Business account to the new one.</p>
+  </div>
+
+  {!configured && (
+    <div class="table-wrap">
+      <div class="empty-state">
+        <h2>Connect both accounts first</h2>
+        <p>Add the WABA ID and access token for the origin and destination accounts to start reading templates.</p>
+        <a class="btn btn-primary" href="/settings">Go to accounts</a>
+      </div>
+    </div>
+  )}
+
+  {configured && (
+    <div id="app" data-origin-label={accounts.origin.label || 'Origin'} data-destination-label={accounts.destination.label || 'Destination'}>
+      <div class="bridge" id="bridge">
+        <div class="bridge-account">
+          <p class="bridge-role">Origin</p>
+          <p class="bridge-name">{accounts.origin.label || 'Origin account'}</p>
+          <div class="bridge-meta">
+            <span>waba {accounts.origin.wabaId}</span>
+            {accounts.origin.phoneNumberId && <span>phone {accounts.origin.phoneNumberId}</span>}
+          </div>
+        </div>
+        <div class="bridge-arrow">
+          <svg width="44" height="24" viewBox="0 0 44 24" fill="none">
+            <path id="flow-path" d="M2 12 H36" stroke-width="1.5" />
+            <polyline points="30,6 38,12 30,18" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none" />
+            <circle class="flow-dot" r="2.5" fill="var(--accent)" style="offset-path: path('M2 12 H36'); opacity: 0;" />
+          </svg>
+        </div>
+        <div class="bridge-account">
+          <p class="bridge-role">Destination</p>
+          <p class="bridge-name">{accounts.destination.label || 'Destination account'}</p>
+          <div class="bridge-meta">
+            <span>waba {accounts.destination.wabaId}</span>
+            {accounts.destination.phoneNumberId && <span>phone {accounts.destination.phoneNumberId}</span>}
+          </div>
+        </div>
+      </div>
+
+      <div id="banner-slot"></div>
+
+      <div class="toolbar">
+        <span class="toolbar-status" id="toolbar-status">Loading templates…</span>
+        <div class="toolbar-actions">
+          <input type="search" id="search-input" class="search-input" placeholder="Search by name" />
+          <select id="category-filter" class="filter-select">
+            <option value="">All categories</option>
+          </select>
+          <button class="btn" id="refresh-btn">Refresh</button>
+        </div>
+      </div>
+
+      <div class="bulkbar" id="bulkbar">
+        <span id="bulk-count">0 selected</span>
+        <button class="btn btn-primary" id="migrate-btn">Migrate selected</button>
+      </div>
+
+      <div class="table-wrap">
+        <table class="templates" id="templates-table">
+          <thead>
+            <tr>
+              <th class="col-check"><input type="checkbox" id="select-all" /></th>
+              <th>Template</th>
+              <th>Category</th>
+              <th>Language</th>
+              <th>Header</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody id="templates-body"></tbody>
+        </table>
+      </div>
+    </div>
+  )}
+</Layout>
+
+<script>
+  type Template = {
+    name: string;
+    language: string;
+    category: string;
+    header: string;
+    needsMedia: boolean;
+    components: unknown[];
+    existsOnDestination: boolean;
+    resultStatus?: 'migrating' | 'success' | 'exists' | 'error' | 'needs-media';
+    errorMessage?: string;
+  };
+
+  const app = document.getElementById('app');
+  if (app) {
+    const body = document.getElementById('templates-body') as HTMLTableSectionElement;
+    const toolbarStatus = document.getElementById('toolbar-status') as HTMLElement;
+    const bannerSlot = document.getElementById('banner-slot') as HTMLElement;
+    const selectAll = document.getElementById('select-all') as HTMLInputElement;
+    const searchInput = document.getElementById('search-input') as HTMLInputElement;
+    const categoryFilter = document.getElementById('category-filter') as HTMLSelectElement;
+    const bulkbar = document.getElementById('bulkbar') as HTMLElement;
+    const bulkCount = document.getElementById('bulk-count') as HTMLElement;
+    const migrateBtn = document.getElementById('migrate-btn') as HTMLButtonElement;
+    const refreshBtn = document.getElementById('refresh-btn') as HTMLButtonElement;
+    const bridge = document.getElementById('bridge') as HTMLElement;
+
+    let allTemplates: Template[] = [];
+    const selected = new Set<string>();
+
+    function rowId(t: Template) {
+      return `${t.name}::${t.language}`;
+    }
+
+    function isLocked(t: Template) {
+      // already handled, or currently in flight, or known to need manual media
+      return ['success', 'exists', 'migrating'].includes(t.resultStatus ?? '') || t.existsOnDestination || t.needsMedia;
+    }
+
+    function visibleTemplates() {
+      const q = searchInput.value.trim().toLowerCase();
+      const cat = categoryFilter.value;
+      return allTemplates.filter((t) => {
+        const matchesQuery = !q || t.name.toLowerCase().includes(q) || t.language.toLowerCase().includes(q);
+        const matchesCategory = !cat || t.category === cat;
+        return matchesQuery && matchesCategory;
+      });
+    }
+
+    function pillHtml(t: Template) {
+      const state = t.resultStatus ?? (t.needsMedia ? 'needs-media' : t.existsOnDestination ? 'exists' : 'pending');
+      const labels: Record<string, string> = {
+        pending: 'Not migrated',
+        migrating: 'Migrating…',
+        success: 'Migrated',
+        exists: 'Already on destination',
+        error: t.errorMessage || 'Failed',
+        'needs-media': 'Needs new media sample',
+      };
+      const title = state === 'error' ? ` title="${(t.errorMessage || '').replace(/"/g, '&quot;')}"` : '';
+      return `<span class="pill is-${state}"${title}>${labels[state]}</span>`;
+    }
+
+    function populateCategoryFilter() {
+      const current = categoryFilter.value;
+      const categories = Array.from(new Set(allTemplates.map((t) => t.category))).sort();
+      categoryFilter.innerHTML =
+        '<option value="">All categories</option>' +
+        categories.map((c) => `<option value="${c}">${c.charAt(0) + c.slice(1).toLowerCase()}</option>`).join('');
+      if (categories.includes(current)) categoryFilter.value = current;
+    }
+
+    function renderRows() {
+      const rows = visibleTemplates();
+
+      if (rows.length === 0) {
+        body.innerHTML = `<tr class="empty-row"><td colspan="6">No templates match your search.</td></tr>`;
+      } else {
+        body.innerHTML = rows
+          .map((t) => {
+            const locked = isLocked(t);
+            const checked = selected.has(rowId(t));
+            return `
+              <tr data-id="${rowId(t)}">
+                <td class="col-check"><input type="checkbox" class="row-check" ${locked ? 'disabled' : ''} ${checked ? 'checked' : ''} /></td>
+                <td class="tpl-name">${t.name}</td>
+                <td>${t.category}</td>
+                <td class="tpl-lang">${t.language}</td>
+                <td>${t.header === 'NONE' ? '—' : t.header.charAt(0) + t.header.slice(1).toLowerCase()}</td>
+                <td data-status>${pillHtml(t)}</td>
+              </tr>`;
+          })
+          .join('');
+      }
+
+      const lockedVisible = rows.filter((t) => !isLocked(t));
+      selectAll.checked = lockedVisible.length > 0 && lockedVisible.every((t) => selected.has(rowId(t)));
+      selectAll.indeterminate =
+        !selectAll.checked && lockedVisible.some((t) => selected.has(rowId(t)));
+
+      updateBulkbar();
+    }
+
+    function updateBulkbar() {
+      bulkbar.classList.toggle('is-visible', selected.size > 0);
+      bulkCount.textContent = `${selected.size} selected`;
+    }
+
+    body.addEventListener('change', (e) => {
+      const target = e.target as HTMLElement;
+      if (!target.classList.contains('row-check')) return;
+      const id = (target.closest('tr') as HTMLElement).dataset.id!;
+      if ((target as HTMLInputElement).checked) selected.add(id);
+      else selected.delete(id);
+      updateBulkbar();
+      // keep the header checkbox in sync without a full re-render
+      const rows = visibleTemplates().filter((t) => !isLocked(t));
+      selectAll.checked = rows.length > 0 && rows.every((t) => selected.has(rowId(t)));
+      selectAll.indeterminate = !selectAll.checked && rows.some((t) => selected.has(rowId(t)));
+    });
+
+    selectAll.addEventListener('change', () => {
+      const rows = visibleTemplates().filter((t) => !isLocked(t));
+      rows.forEach((t) => {
+        if (selectAll.checked) selected.add(rowId(t));
+        else selected.delete(rowId(t));
+      });
+      renderRows();
+    });
+
+    searchInput.addEventListener('input', renderRows);
+    categoryFilter.addEventListener('change', renderRows);
+
+    async function loadTemplates() {
+      toolbarStatus.textContent = 'Loading templates…';
+      bannerSlot.innerHTML = '';
+      const res = await fetch('/api/templates/list');
+      const data = await res.json();
+
+      if (!res.ok) {
+        toolbarStatus.textContent = '';
+        bannerSlot.innerHTML = `<div class="banner">${data.error}</div>`;
+        return;
+      }
+
+      allTemplates = data.templates;
+      selected.clear();
+      const pendingCount = allTemplates.filter((t: Template) => !t.existsOnDestination && !t.needsMedia).length;
+      toolbarStatus.textContent = `${data.originCount} templates on ${data.originLabel} · ${pendingCount} ready to migrate`;
+      populateCategoryFilter();
+      renderRows();
+    }
+
+    async function migrateOne(t: Template) {
+      t.resultStatus = 'migrating';
+      const row = body.querySelector(`tr[data-id="${rowId(t)}"] [data-status]`) as HTMLElement | null;
+      if (row) row.innerHTML = pillHtml(t);
+
+      const res = await fetch('/api/templates/migrate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(t),
+      });
+      const data = await res.json();
+      t.resultStatus = data.ok ? 'success' : data.status || 'error';
+      t.errorMessage = data.message;
+
+      const updatedRow = body.querySelector(`tr[data-id="${rowId(t)}"] [data-status]`) as HTMLElement | null;
+      if (updatedRow) updatedRow.innerHTML = pillHtml(t);
+    }
+
+    migrateBtn.addEventListener('click', async () => {
+      const toMigrate = allTemplates.filter((t) => selected.has(rowId(t)));
+      if (toMigrate.length === 0) return;
+
+      migrateBtn.disabled = true;
+      bridge.classList.add('is-active');
+
+      for (const t of toMigrate) {
+        await migrateOne(t);
+        selected.delete(rowId(t));
+      }
+
+      bridge.classList.remove('is-active');
+      migrateBtn.disabled = false;
+      renderRows();
+    });
+
+    refreshBtn.addEventListener('click', loadTemplates);
+
+    loadTemplates();
+  }
+</script>
