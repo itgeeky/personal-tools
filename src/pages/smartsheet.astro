@@ -6,9 +6,9 @@ import Layout from '../layouts/Layout.astro';
     <div class="page-head">
       <h1>Smartsheet → Table</h1>
       <p>
-        Load a raw Smartsheet API response — a sheet, or an array of sheets — and browse it as a
-        table. Rows render as you scroll, so a 1,000,000-row export opens as fast as a 10-row one,
-        and nothing about the data is reshaped or reformatted.
+        Load a raw Smartsheet API response — a sheet, a report, or an array of either — and browse
+        it as a table. Rows render as you scroll, so a 1,000,000-row export opens as fast as a
+        10-row one, and nothing about the data is reshaped or reformatted.
       </p>
     </div>
 
@@ -30,7 +30,8 @@ import Layout from '../layouts/Layout.astro';
           <textarea id="json-input" placeholder="Paste the JSON exported from Smartsheet here…"></textarea>
           <div class="row-actions">
             <button class="btn" id="convert-btn">Convert to table</button>
-            <button class="btn" id="sample-btn">Load example</button>
+            <button class="btn" id="sample-btn">Load sheet example</button>
+            <button class="btn" id="sample-report-btn">Load report example</button>
             <button class="btn btn-quiet" id="clear-btn">Clear</button>
           </div>
         </details>
@@ -365,8 +366,15 @@ import Layout from '../layouts/Layout.astro';
 </style>
 
 <script>
-  type Column = { id: number; index?: number; title: string; type?: string; options?: string[] };
-  type Cell = { columnId: number; displayValue?: string; value?: unknown };
+  // A Smartsheet "report" response uses different ids than a plain sheet: each
+  // column is keyed by virtualId (not id), and each cell points at its column via
+  // virtualColumnId (not columnId) — necessary because a report can pull rows from
+  // several source sheets, each with its own real columnId for what the report
+  // shows as one merged column. normalizeReportShape() below folds virtualId /
+  // virtualColumnId onto id / columnId on load so the rest of the file — which
+  // only ever reads .id and .columnId — treats sheets and reports identically.
+  type Column = { id: number; virtualId?: number; index?: number; title: string; type?: string; options?: string[]; primary?: boolean };
+  type Cell = { columnId: number; virtualColumnId?: number; displayValue?: string; value?: unknown };
   type Row = { id: number; cells: Cell[] };
   type Sheet = {
     name?: string;
@@ -439,6 +447,7 @@ import Layout from '../layouts/Layout.astro';
   const jsonInput = document.getElementById('json-input') as HTMLTextAreaElement;
   const convertBtn = document.getElementById('convert-btn') as HTMLButtonElement;
   const sampleBtn = document.getElementById('sample-btn') as HTMLButtonElement;
+  const sampleReportBtn = document.getElementById('sample-report-btn') as HTMLButtonElement;
   const clearBtn = document.getElementById('clear-btn') as HTMLButtonElement;
   const metaBlock = document.getElementById('meta-block') as HTMLElement;
   const sheetMetaEl = document.getElementById('sheet-meta') as HTMLElement;
@@ -454,6 +463,7 @@ import Layout from '../layouts/Layout.astro';
 
   // state
   let sheet: Sheet | null = null;
+  let isReport = false;
   let columns: Column[] = [];
   let rows: Row[] = [];
   let columnValueCache: Map<number, (string | null)[]> = new Map();
@@ -475,6 +485,7 @@ import Layout from '../layouts/Layout.astro';
   function setBusy(busy: boolean) {
     convertBtn.disabled = busy;
     sampleBtn.disabled = busy;
+    sampleReportBtn.disabled = busy;
     pickFileBtn.disabled = busy;
     searchInput.disabled = busy;
     filtersPanel.querySelectorAll('select, input, button').forEach((el) => {
@@ -534,19 +545,36 @@ import Layout from '../layouts/Layout.astro';
     }, 0);
   }
 
+  function normalizeReportShape(s: Sheet) {
+    let isReport = false;
+    for (const c of s.columns) {
+      if (c.virtualId !== undefined) {
+        c.id = c.virtualId;
+        isReport = true;
+      }
+    }
+    for (const r of s.rows) {
+      for (const cell of r.cells) {
+        if (cell.virtualColumnId !== undefined) cell.columnId = cell.virtualColumnId;
+      }
+    }
+    return isReport;
+  }
+
   function loadSheet(parsed: unknown) {
     const candidate = Array.isArray(parsed) ? parsed[0] : parsed;
     const s = candidate as Sheet;
     if (!s || !Array.isArray(s.columns) || !Array.isArray(s.rows)) {
-      setStatus('Unrecognized shape — expected a sheet with "columns" and "rows".', 'err');
+      setStatus('Unrecognized shape — expected a sheet or report with "columns" and "rows".', 'err');
       return;
     }
 
+    isReport = normalizeReportShape(s);
     sheet = s;
     columns = [...s.columns].sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
     rows = s.rows;
     statusCol = columns.find((c) => /ESTATUS/i.test(c.title));
-    refCol = columns.find((c) => /REFEREN/i.test(c.title));
+    refCol = columns.find((c) => c.primary) ?? columns.find((c) => /REFEREN/i.test(c.title));
     econCol = columns.find((c) => /ECONOMICO/i.test(c.title));
     sortState = { colId: null, dir: 1 };
 
@@ -735,6 +763,7 @@ import Layout from '../layouts/Layout.astro';
   function renderMeta() {
     if (!sheet) return;
     sheetMetaEl.textContent = [
+      isReport ? 'Report' : 'Sheet',
       sheet.name || 'Untitled sheet',
       sheet.workspace?.name,
       sheet.modifiedAt ? `updated ${sheet.modifiedAt}` : null,
@@ -971,10 +1000,17 @@ import Layout from '../layouts/Layout.astro';
     loadSheet(SAMPLE_DATA);
   });
 
+  sampleReportBtn.addEventListener('click', () => {
+    jsonInput.value = JSON.stringify(SAMPLE_REPORT_DATA, null, 2);
+    panel.classList.add('is-open');
+    loadSheet(SAMPLE_REPORT_DATA);
+  });
+
   clearBtn.addEventListener('click', () => {
     jsonInput.value = '';
     fileInput.value = '';
     sheet = null;
+    isReport = false;
     columns = [];
     rows = [];
     columnValueCache = new Map();
@@ -1086,6 +1122,132 @@ import Layout from '../layouts/Layout.astro';
           { columnId: 7986458918709124, value: '2026-09-07' },
         ]},
       ],
+    },
+  ];
+
+  // ---- bundled example (a trimmed real Smartsheet "get report" response) ----
+  // Reports key columns by virtualId and cells by virtualColumnId rather than
+  // id/columnId — see normalizeReportShape() above for why.
+  const SAMPLE_REPORT_DATA = [
+    {
+      id: 630282993487748,
+      name: 'Resumen Dorstep',
+      totalRowCount: 8,
+      accessLevel: 'EDITOR_SHARE',
+      workspace: { id: 6251965421250436, name: 'Dorstep' },
+      permalink: 'https://app.smartsheet.com/reports/PcFrR9QFmQq3wGV8Cc8jmFRvhWR33r5V5pWrxM51',
+      modifiedAt: '2026-09-08T20:05:16Z',
+      columns: [
+        { virtualId: 6714983347687300, index: 0, title: 'Primaria', type: 'TEXT_NUMBER', primary: true },
+        { virtualId: 3114330801082244, index: 1, title: 'ORIGEN', type: 'PICKLIST' },
+        { virtualId: 5366130614767492, index: 2, title: 'DESTINO', type: 'TEXT_NUMBER' },
+        { virtualId: 28465853927300, index: 3, title: 'PRODUCTO', type: 'TEXT_NUMBER' },
+        { virtualId: 7617930428452740, index: 4, title: 'ECONOMICO', type: 'TEXT_NUMBER' },
+        { virtualId: 4267873452986244, index: 5, title: 'FECHA DESCARGA PROGRAMADA', type: 'DATE' },
+        { virtualId: 862530987396996, index: 6, title: 'FECHA ETA DESTINO', type: 'DATE' },
+        { virtualId: 8573981894152068, index: 7, title: 'ETA DESTINO', type: 'PICKLIST' },
+        { virtualId: 8180880381874052, index: 8, title: 'FECHA ENTREGA REAL', type: 'DATE' },
+        { virtualId: 1988430894239620, index: 9, title: 'ESTATUS OPS', type: 'PICKLIST' },
+      ],
+      rows: [
+        { id: 8174551627857796, rowNumber: 1, cells: [
+          { columnId: 2326409282119556, virtualColumnId: 6714983347687300, value: 'R20M2620928', displayValue: 'R20M2620928' },
+          { columnId: 3452309188962180, virtualColumnId: 3114330801082244, value: 'PUEBLA', displayValue: 'PUEBLA' },
+          { columnId: 2938016920037252, virtualColumnId: 5366130614767492, value: 'COSTCO PUEBLA', displayValue: 'COSTCO PUEBLA' },
+          { columnId: 7441616547407748, virtualColumnId: 28465853927300, value: 'PREMIUM', displayValue: 'PREMIUM' },
+          { columnId: 1907860424157060, virtualColumnId: 7617930428452740, value: '40-LER-42-49-A', displayValue: '40-LER-42-49-A' },
+          { columnId: 4159660237842308, virtualColumnId: 4267873452986244, value: '2026-09-09' },
+          { columnId: 7986458918709124, virtualColumnId: 862530987396996, value: '2026-09-09' },
+          { columnId: 3482859291338628, virtualColumnId: 8573981894152068, value: '21:00', displayValue: '21:00' },
+          { columnId: 668109524232068, virtualColumnId: 8180880381874052, value: '2026-09-09' },
+          { columnId: 4608759198181252, virtualColumnId: 1988430894239620, value: '06 ENTREGADO', displayValue: '06 ENTREGADO' },
+        ]},
+        { id: 856202233380740, rowNumber: 2, cells: [
+          { columnId: 2326409282119556, virtualColumnId: 6714983347687300, value: 'R20M2620929', displayValue: 'R20M2620929' },
+          { columnId: 3452309188962180, virtualColumnId: 3114330801082244, value: 'PUEBLA', displayValue: 'PUEBLA' },
+          { columnId: 2938016920037252, virtualColumnId: 5366130614767492, value: 'COSTCO PUEBLA', displayValue: 'COSTCO PUEBLA' },
+          { columnId: 7441616547407748, virtualColumnId: 28465853927300, value: 'REGULAR', displayValue: 'REGULAR' },
+          { columnId: 1907860424157060, virtualColumnId: 7617930428452740, value: '40-LER-42-49-A', displayValue: '40-LER-42-49-A' },
+          { columnId: 4159660237842308, virtualColumnId: 4267873452986244, value: '2026-09-10' },
+          { columnId: 7986458918709124, virtualColumnId: 862530987396996, value: '2026-09-10' },
+          { columnId: 3482859291338628, virtualColumnId: 8573981894152068, value: '08:00', displayValue: '08:00' },
+          { columnId: 668109524232068, virtualColumnId: 8180880381874052, value: '2026-09-10' },
+          { columnId: 4608759198181252, virtualColumnId: 1988430894239620, value: '06 ENTREGADO', displayValue: '06 ENTREGADO' },
+        ]},
+        { id: 3057912029773700, rowNumber: 3, cells: [
+          { columnId: 2326409282119556, virtualColumnId: 6714983347687300, value: 'R20M2620804', displayValue: 'R20M2620804' },
+          { columnId: 3452309188962180, virtualColumnId: 3114330801082244, value: 'TIZAYUCA', displayValue: 'TIZAYUCA' },
+          { columnId: 2938016920037252, virtualColumnId: 5366130614767492, value: 'VALLE DE BRAVO', displayValue: 'VALLE DE BRAVO' },
+          { columnId: 7441616547407748, virtualColumnId: 28465853927300, value: 'REGULAR', displayValue: 'REGULAR' },
+          { columnId: 1907860424157060, virtualColumnId: 7617930428452740, value: '32-ATO-96-575', displayValue: '32-ATO-96-575' },
+          { columnId: 4159660237842308, virtualColumnId: 4267873452986244, value: '2026-09-09' },
+          { columnId: 7986458918709124, virtualColumnId: 862530987396996, value: '2026-09-09' },
+          { columnId: 3482859291338628, virtualColumnId: 8573981894152068, value: '15:00', displayValue: '15:00' },
+          { columnId: 668109524232068, virtualColumnId: 8180880381874052, value: '2026-09-09' },
+          { columnId: 4608759198181252, virtualColumnId: 1988430894239620, value: '06 ENTREGADO', displayValue: '06 ENTREGADO' },
+        ]},
+        { id: 8408502054289284, rowNumber: 4, cells: [
+          { columnId: 2326409282119556, virtualColumnId: 6714983347687300, value: 'R20M2620844', displayValue: 'R20M2620844' },
+          { columnId: 3452309188962180, virtualColumnId: 3114330801082244, value: 'ALTAMIRA', displayValue: 'ALTAMIRA' },
+          { columnId: 2938016920037252, virtualColumnId: 5366130614767492, value: 'COMSERPO', displayValue: 'COMSERPO' },
+          { columnId: 7441616547407748, virtualColumnId: 28465853927300, value: 'REGULAR', displayValue: 'REGULAR' },
+          { columnId: 1907860424157060, virtualColumnId: 7617930428452740, value: '20-TRA-T4006-R2001-C1', displayValue: '20-TRA-T4006-R2001-C1' },
+          { columnId: 4159660237842308, virtualColumnId: 4267873452986244, value: '2026-09-09' },
+          { columnId: 7986458918709124, virtualColumnId: 862530987396996, value: '2026-09-09' },
+          { columnId: 3482859291338628, virtualColumnId: 8573981894152068, value: '21:00', displayValue: '21:00' },
+          { columnId: 668109524232068, virtualColumnId: 8180880381874052, value: '2026-09-09' },
+          { columnId: 4608759198181252, virtualColumnId: 1988430894239620, value: '06 ENTREGADO', displayValue: '06 ENTREGADO' },
+        ]},
+        { id: 5040895129419652, rowNumber: 5, cells: [
+          { columnId: 2326409282119556, virtualColumnId: 6714983347687300, value: 'R20M2620779', displayValue: 'R20M2620779' },
+          { columnId: 3452309188962180, virtualColumnId: 3114330801082244, value: 'PUEBLA', displayValue: 'PUEBLA' },
+          { columnId: 2938016920037252, virtualColumnId: 5366130614767492, value: 'TEMIXCO', displayValue: 'TEMIXCO' },
+          { columnId: 7441616547407748, virtualColumnId: 28465853927300, value: 'DIESEL', displayValue: 'DIESEL' },
+          { columnId: 1907860424157060, virtualColumnId: 7617930428452740, value: '20-TRA-T2034-TQ34-C1', displayValue: '20-TRA-T2034-TQ34-C1' },
+          { columnId: 4159660237842308, virtualColumnId: 4267873452986244, value: '2026-09-08' },
+          { columnId: 7986458918709124, virtualColumnId: 862530987396996, value: '2026-09-09' },
+          { columnId: 3482859291338628, virtualColumnId: 8573981894152068, value: '10:00', displayValue: '10:00' },
+          { columnId: 668109524232068, virtualColumnId: 8180880381874052, value: '2026-09-09' },
+          { columnId: 4608759198181252, virtualColumnId: 1988430894239620, value: '06 ENTREGADO', displayValue: '06 ENTREGADO' },
+        ]},
+        { id: 1982102140223364, rowNumber: 6, cells: [
+          { columnId: 2326409282119556, virtualColumnId: 6714983347687300, value: 'R20M2620933', displayValue: 'R20M2620933' },
+          { columnId: 3452309188962180, virtualColumnId: 3114330801082244, value: 'PUEBLA', displayValue: 'PUEBLA' },
+          { columnId: 2938016920037252, virtualColumnId: 5366130614767492, value: 'COSTCO PUEBLA', displayValue: 'COSTCO PUEBLA' },
+          { columnId: 7441616547407748, virtualColumnId: 28465853927300, value: 'PREMIUM', displayValue: 'PREMIUM' },
+          { columnId: 1907860424157060, virtualColumnId: 7617930428452740, value: '40-LER-42-49-A', displayValue: '40-LER-42-49-A' },
+          { columnId: 4159660237842308, virtualColumnId: 4267873452986244, value: '2026-09-11' },
+          { columnId: 7986458918709124, virtualColumnId: 862530987396996 },
+          { columnId: 3482859291338628, virtualColumnId: 8573981894152068 },
+          { columnId: 668109524232068, virtualColumnId: 8180880381874052 },
+          { columnId: 4608759198181252, virtualColumnId: 1988430894239620, value: '00 PROGRAMADO', displayValue: '00 PROGRAMADO' },
+        ]},
+        { id: 6344964279238532, rowNumber: 7, cells: [
+          { columnId: 2326409282119556, virtualColumnId: 6714983347687300, value: 'R20M2620950', displayValue: 'R20M2620950' },
+          { columnId: 3452309188962180, virtualColumnId: 3114330801082244, value: 'TIZAYUCA', displayValue: 'TIZAYUCA' },
+          { columnId: 2938016920037252, virtualColumnId: 5366130614767492, value: 'COSTCO ATIZAPAN', displayValue: 'COSTCO ATIZAPAN' },
+          { columnId: 7441616547407748, virtualColumnId: 28465853927300, value: 'REGULAR ZM', displayValue: 'REGULAR ZM' },
+          { columnId: 1907860424157060, virtualColumnId: 7617930428452740, value: '29-TRA-T2021-R4014-1', displayValue: '29-TRA-T2021-R4014-1' },
+          { columnId: 4159660237842308, virtualColumnId: 4267873452986244, value: '2026-09-11' },
+          { columnId: 7986458918709124, virtualColumnId: 862530987396996 },
+          { columnId: 3482859291338628, virtualColumnId: 8573981894152068 },
+          { columnId: 668109524232068, virtualColumnId: 8180880381874052 },
+          { columnId: 4608759198181252, virtualColumnId: 1988430894239620, value: '01 TRANSITO TERMINAL', displayValue: '01 TRANSITO TERMINAL' },
+        ]},
+        { id: 8596764092923780, rowNumber: 8, cells: [
+          { columnId: 2326409282119556, virtualColumnId: 6714983347687300, value: 'R20M2620952', displayValue: 'R20M2620952' },
+          { columnId: 3452309188962180, virtualColumnId: 3114330801082244, value: 'TIZAYUCA', displayValue: 'TIZAYUCA' },
+          { columnId: 2938016920037252, virtualColumnId: 5366130614767492, value: 'COSTCO ATIZAPAN', displayValue: 'COSTCO ATIZAPAN' },
+          { columnId: 7441616547407748, virtualColumnId: 28465853927300, value: 'REGULAR ZM', displayValue: 'REGULAR ZM' },
+          { columnId: 1907860424157060, virtualColumnId: 7617930428452740, value: '30-LER-48-10-A', displayValue: '30-LER-48-10-A' },
+          { columnId: 4159660237842308, virtualColumnId: 4267873452986244, value: '2026-09-12' },
+          { columnId: 7986458918709124, virtualColumnId: 862530987396996 },
+          { columnId: 3482859291338628, virtualColumnId: 8573981894152068 },
+          { columnId: 668109524232068, virtualColumnId: 8180880381874052 },
+          { columnId: 4608759198181252, virtualColumnId: 1988430894239620, value: '00 PROGRAMADO', displayValue: '00 PROGRAMADO' },
+        ]},
+      ],
+      isSummaryReport: false,
     },
   ];
 </script>
