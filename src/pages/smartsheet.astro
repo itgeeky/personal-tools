@@ -44,10 +44,9 @@ import Layout from '../layouts/Layout.astro';
 
     <div class="toolbar" id="toolbar" hidden>
       <input type="search" id="search-input" class="search-input" placeholder="Search any column" />
-      <select id="status-filter" class="filter-select" hidden>
-        <option value="">All statuses</option>
-      </select>
     </div>
+
+    <div class="filters-panel" id="filters-panel" hidden></div>
 
     <div class="vt-scroll" id="vt-scroll" hidden>
       <table class="vt-table">
@@ -174,8 +173,69 @@ import Layout from '../layouts/Layout.astro';
     margin-bottom: 12px;
   }
 
-  #status-filter[hidden] {
+  .filters-panel[hidden] {
     display: none;
+  }
+
+  .filters-panel {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: 14px 20px;
+    margin-bottom: 12px;
+    padding: 12px 14px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--surface);
+  }
+
+  .filter-group {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    min-width: 140px;
+  }
+
+  .filter-group label {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+  }
+
+  .filter-range {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .filter-range span {
+    color: var(--ink-faint);
+    font-size: 12px;
+  }
+
+  .filter-input {
+    width: 108px;
+  }
+
+  .filter-select,
+  .filter-input {
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    color: var(--ink);
+    font-size: 12.5px;
+    padding: 6px 8px;
+  }
+
+  .filter-select:focus,
+  .filter-input:focus {
+    border-color: var(--accent);
+  }
+
+  .filter-clear-btn {
+    align-self: flex-end;
   }
 
   /* ---- virtualized table ---- */
@@ -305,7 +365,7 @@ import Layout from '../layouts/Layout.astro';
 </style>
 
 <script>
-  type Column = { id: number; index?: number; title: string };
+  type Column = { id: number; index?: number; title: string; type?: string; options?: string[] };
   type Cell = { columnId: number; displayValue?: string; value?: unknown };
   type Row = { id: number; cells: Cell[] };
   type Sheet = {
@@ -319,8 +379,22 @@ import Layout from '../layouts/Layout.astro';
     rows: Row[];
   };
 
+  type ColumnFilterMeta =
+    | { kind: 'category'; options: string[] }
+    | { kind: 'number' }
+    | { kind: 'date' }
+    | { kind: 'boolean' };
+
+  type FilterValue =
+    | { kind: 'category'; value: string }
+    | { kind: 'boolean'; value: string }
+    | { kind: 'number'; min: string; max: string }
+    | { kind: 'date'; from: string; to: string };
+
   const ROW_HEIGHT = 36;
   const OVERSCAN = 10;
+  const CATEGORY_MAX_DISTINCT = 30;
+  const DATE_RE = /^\d{4}-\d{2}-\d{2}(T.*)?$/;
 
   const STATUS_COLOR_RULES: [RegExp, string][] = [
     [/PROGRAMADO/i, 'var(--st-programado)'],
@@ -371,7 +445,7 @@ import Layout from '../layouts/Layout.astro';
   const metaChipsEl = document.getElementById('meta-chips') as HTMLElement;
   const toolbar = document.getElementById('toolbar') as HTMLElement;
   const searchInput = document.getElementById('search-input') as HTMLInputElement;
-  const statusFilterEl = document.getElementById('status-filter') as HTMLSelectElement;
+  const filtersPanel = document.getElementById('filters-panel') as HTMLElement;
   const vtScroll = document.getElementById('vt-scroll') as HTMLElement;
   const vtThead = document.getElementById('vt-thead') as HTMLElement;
   const vtTbody = document.getElementById('vt-tbody') as HTMLElement;
@@ -389,6 +463,8 @@ import Layout from '../layouts/Layout.astro';
   let refCol: Column | undefined;
   let econCol: Column | undefined;
   let numericColumnIds: Set<number> = new Set();
+  let columnFilterMeta: Map<number, ColumnFilterMeta> = new Map();
+  let activeFilters: Map<number, FilterValue> = new Map();
   let scrollScheduled = false;
 
   function setStatus(msg: string, type?: 'ok' | 'err') {
@@ -401,7 +477,9 @@ import Layout from '../layouts/Layout.astro';
     sampleBtn.disabled = busy;
     pickFileBtn.disabled = busy;
     searchInput.disabled = busy;
-    statusFilterEl.disabled = busy;
+    filtersPanel.querySelectorAll('select, input, button').forEach((el) => {
+      (el as HTMLInputElement | HTMLSelectElement | HTMLButtonElement).disabled = busy;
+    });
   }
 
   panelHead.addEventListener('click', () => panel.classList.toggle('is-open'));
@@ -473,8 +551,14 @@ import Layout from '../layouts/Layout.astro';
     sortState = { colId: null, dir: 1 };
 
     buildColumnValueCache();
-    numericColumnIds = new Set(columns.filter((c) => isNumericColumn(c.id)).map((c) => c.id));
-    buildStatusFilterOptions();
+    columnFilterMeta = new Map();
+    for (const c of columns) {
+      const meta = classifyColumn(c);
+      if (meta) columnFilterMeta.set(c.id, meta);
+    }
+    numericColumnIds = new Set([...columnFilterMeta].filter(([, m]) => m.kind === 'number').map(([id]) => id));
+    activeFilters = new Map();
+    renderFilters();
     filteredIndices = identityIndices(rows.length);
 
     renderMeta();
@@ -528,19 +612,123 @@ import Layout from '../layouts/Layout.astro';
     return seen > 0 && numeric === seen;
   }
 
-  function buildStatusFilterOptions() {
-    statusFilterEl.innerHTML = '<option value="">All statuses</option>';
-    if (!statusCol) {
-      statusFilterEl.hidden = true;
+  // Infer a filter control per column from its Smartsheet column "type" (when the
+  // export includes one) or, failing that, from the shape of its own values —
+  // most raw exports omit column types entirely, so inference is the common path.
+  function classifyColumn(col: Column): ColumnFilterMeta | null {
+    const arr = columnValueCache.get(col.id)!;
+    const nonEmpty = arr.filter((v): v is string => v !== null && v !== '');
+    if (nonEmpty.length === 0) return null;
+
+    const type = (col.type || '').toUpperCase();
+
+    if (type === 'CHECKBOX') return { kind: 'boolean' };
+    if (type === 'DATE' || type === 'DATETIME' || type === 'ABSTRACT_DATETIME') return { kind: 'date' };
+    if (type === 'PICKLIST' && col.options && col.options.length) {
+      return { kind: 'category', options: [...col.options].sort() };
+    }
+
+    if (isNumericColumn(col.id)) return { kind: 'number' };
+    if (nonEmpty.every((v) => DATE_RE.test(v))) return { kind: 'date' };
+
+    const lowerSet = new Set(nonEmpty.map((v) => v.toLowerCase()));
+    if (lowerSet.size <= 2 && [...lowerSet].every((v) => v === 'true' || v === 'false')) {
+      return { kind: 'boolean' };
+    }
+
+    const distinct = [...new Set(nonEmpty)];
+    if (distinct.length > 1 && distinct.length <= CATEGORY_MAX_DISTINCT && distinct.length < nonEmpty.length) {
+      return { kind: 'category', options: distinct.sort() };
+    }
+
+    return null;
+  }
+
+  function renderFilters() {
+    if (columnFilterMeta.size === 0) {
+      filtersPanel.hidden = true;
+      filtersPanel.innerHTML = '';
       return;
     }
-    statusFilterEl.hidden = false;
-    const values = new Set(columnValueCache.get(statusCol.id)!.filter((v): v is string => v !== null));
-    [...values].sort().forEach((v) => {
-      const opt = document.createElement('option');
-      opt.value = v;
-      opt.textContent = v;
-      statusFilterEl.appendChild(opt);
+    filtersPanel.hidden = false;
+    const colById = new Map(columns.map((c) => [c.id, c]));
+
+    let html = '';
+    for (const [colId, meta] of columnFilterMeta) {
+      const title = escapeHtml(colById.get(colId)!.title);
+      if (meta.kind === 'category') {
+        html += `<div class="filter-group" data-filter-col="${colId}" data-filter-kind="category">
+          <label>${title}</label>
+          <select class="filter-select" data-col-id="${colId}">
+            <option value="">All</option>
+            ${meta.options.map((o) => `<option value="${escapeHtml(o)}">${escapeHtml(o)}</option>`).join('')}
+          </select>
+        </div>`;
+      } else if (meta.kind === 'boolean') {
+        html += `<div class="filter-group" data-filter-col="${colId}" data-filter-kind="boolean">
+          <label>${title}</label>
+          <select class="filter-select" data-col-id="${colId}">
+            <option value="">All</option>
+            <option value="true">Checked</option>
+            <option value="false">Unchecked</option>
+          </select>
+        </div>`;
+      } else if (meta.kind === 'number') {
+        html += `<div class="filter-group" data-filter-col="${colId}" data-filter-kind="number">
+          <label>${title}</label>
+          <div class="filter-range">
+            <input type="number" class="filter-input" data-col-id="${colId}" data-bound="min" placeholder="Min" />
+            <span>–</span>
+            <input type="number" class="filter-input" data-col-id="${colId}" data-bound="max" placeholder="Max" />
+          </div>
+        </div>`;
+      } else if (meta.kind === 'date') {
+        html += `<div class="filter-group" data-filter-col="${colId}" data-filter-kind="date">
+          <label>${title}</label>
+          <div class="filter-range">
+            <input type="date" class="filter-input" data-col-id="${colId}" data-bound="from" />
+            <span>–</span>
+            <input type="date" class="filter-input" data-col-id="${colId}" data-bound="to" />
+          </div>
+        </div>`;
+      }
+    }
+    html += `<button type="button" class="btn btn-quiet filter-clear-btn" id="filters-clear-btn">Clear filters</button>`;
+    filtersPanel.innerHTML = html;
+    wireFilterControls();
+  }
+
+  function wireFilterControls() {
+    filtersPanel.querySelectorAll<HTMLSelectElement>('select.filter-select').forEach((el) => {
+      el.addEventListener('change', () => {
+        const colId = Number(el.dataset.colId);
+        const kind = (el.closest('.filter-group') as HTMLElement).dataset.filterKind as 'category' | 'boolean';
+        if (el.value === '') activeFilters.delete(colId);
+        else activeFilters.set(colId, { kind, value: el.value });
+        recomputeFilter();
+      });
+    });
+
+    filtersPanel.querySelectorAll<HTMLElement>('.filter-group[data-filter-kind="number"], .filter-group[data-filter-kind="date"]').forEach((group) => {
+      const kind = group.dataset.filterKind as 'number' | 'date';
+      const colId = Number((group.querySelector('input.filter-input') as HTMLInputElement).dataset.colId);
+      const inputs = [...group.querySelectorAll<HTMLInputElement>('input.filter-input')];
+      const onChange = debounce(() => {
+        const lo = inputs.find((i) => i.dataset.bound === (kind === 'number' ? 'min' : 'from'))!.value;
+        const hi = inputs.find((i) => i.dataset.bound === (kind === 'number' ? 'max' : 'to'))!.value;
+        if (!lo && !hi) activeFilters.delete(colId);
+        else if (kind === 'number') activeFilters.set(colId, { kind: 'number', min: lo, max: hi });
+        else activeFilters.set(colId, { kind: 'date', from: lo, to: hi });
+        recomputeFilter();
+      }, 250);
+      inputs.forEach((input) => input.addEventListener('input', onChange));
+    });
+
+    document.getElementById('filters-clear-btn')?.addEventListener('click', () => {
+      activeFilters.clear();
+      filtersPanel.querySelectorAll('select').forEach((el) => ((el as HTMLSelectElement).value = ''));
+      filtersPanel.querySelectorAll('input').forEach((el) => ((el as HTMLInputElement).value = ''));
+      recomputeFilter();
     });
   }
 
@@ -615,14 +803,33 @@ import Layout from '../layouts/Layout.astro';
 
   function computeFilteredIndices() {
     const q = searchInput.value.trim().toLowerCase();
-    const statusVal = statusFilterEl.value;
-    const statusValues = statusCol ? columnValueCache.get(statusCol.id)! : null;
     const columnArrays = columns.map((c) => columnValueCache.get(c.id)!);
     const n = rows.length;
     const result: number[] = [];
 
-    for (let i = 0; i < n; i++) {
-      if (statusVal && statusValues && statusValues[i] !== statusVal) continue;
+    const filterEntries = [...activeFilters.entries()].map(([colId, f]) => ({
+      f,
+      values: columnValueCache.get(colId)!,
+    }));
+
+    rowLoop: for (let i = 0; i < n; i++) {
+      for (const { f, values } of filterEntries) {
+        const v = values[i];
+        if (f.kind === 'category' || f.kind === 'boolean') {
+          if (v !== f.value) continue rowLoop;
+        } else if (f.kind === 'number') {
+          if (v === null || v === '') continue rowLoop;
+          const num = Number(v);
+          if (f.min !== '' && num < Number(f.min)) continue rowLoop;
+          if (f.max !== '' && num > Number(f.max)) continue rowLoop;
+        } else if (f.kind === 'date') {
+          if (v === null || v === '') continue rowLoop;
+          const t = Date.parse(v);
+          if (Number.isNaN(t)) continue rowLoop;
+          if (f.from && t < Date.parse(f.from)) continue rowLoop;
+          if (f.to && t > Date.parse(f.to) + 86399999) continue rowLoop;
+        }
+      }
       if (q) {
         let found = false;
         for (const arr of columnArrays) {
@@ -677,7 +884,6 @@ import Layout from '../layouts/Layout.astro';
 
   const debouncedFilter = debounce(recomputeFilter, 250);
   searchInput.addEventListener('input', debouncedFilter);
-  statusFilterEl.addEventListener('change', recomputeFilter);
 
   function renderRowHtml(rowIndex: number, position: number) {
     let html = `<tr class="${position % 2 === 1 ? 'alt' : ''}">`;
@@ -773,6 +979,10 @@ import Layout from '../layouts/Layout.astro';
     rows = [];
     columnValueCache = new Map();
     numericColumnIds = new Set();
+    columnFilterMeta = new Map();
+    activeFilters = new Map();
+    filtersPanel.hidden = true;
+    filtersPanel.innerHTML = '';
     filteredIndices = [];
     searchInput.value = '';
     metaBlock.hidden = true;
